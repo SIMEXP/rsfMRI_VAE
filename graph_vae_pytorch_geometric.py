@@ -2,15 +2,19 @@
 
 import torch
 import os
-import dgl
 import torch.utils.data
 import numpy as np
 import networkx as nx
 from glob import glob
-import dgl.function as fn
+import argparse
 from torch import nn, optim
 from torch.nn import functional as F
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops, degree
+from torchvision import transforms
+from torchvision.utils import save_image
 from torch.utils.data import DataLoader, Dataset
+from torch_geometric.nn import GCNConv, VGAE
 
 # changed configuration to this instead of argparse for easier interaction
 CUDA = True
@@ -29,9 +33,15 @@ cuda = torch.device('cuda')
 torch.manual_seed(SEED)
 if CUDA:
     torch.cuda.manual_seed(SEED)
-    
-kwargs = {'num_workers': 1, 'pin_memory': True} if CUDA else {}
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', type=str, default='VGAE')
+args = parser.parse_args()
+assert args.model in ['VGAE']
+   
+kwargs = {'num_workers': 1, 'pin_memory': True, 'VGAE': VGAE} if CUDA else {'VGAE': VGAE}
+
+'''
 #create customized dataset
 class CustomDataset(Dataset):    
     def __init__(self,data_root):
@@ -53,59 +63,17 @@ class CustomDataset(Dataset):
         label,name=self.samples[idx]
         print('label is %s' % label)
         print('name is %s' % name)
-        G = nx.MultiGraph()
-        #load numpy array from saved .npy file
-        a = np.load(name)
-        #reshape stacked numpy array to 2d 
-        b = np.reshape(a, (39,39), order='C')        
-        #convert reshaped numpy array to networkx graph 
-        D = nx.nx.convert.to_networkx_graph(b, create_using=nx.MultiGraph)
-        G.add_nodes_from(D.nodes)
-        G.add_edges_from(D.edges) 
-        #convert netowrkx graph to dgl graph
-        graph=dgl.DGLGraph()
-        graph.from_networkx(G)
+        graph = np.load(name)
         return graph, label
+'''
     
 #create custom collate funtion
 def collate(samples):
     graphs, labels = map(list, zip(*samples))
-    batched_graph = dgl.batch(graphs)
     labels=np.asarray(labels, dtype='float')
-    return batched_graph, torch.Tensor(labels)
-
-#sends a message of node feature h
-msg = fn.copy_src(src='h', out='m')
-
-def reduce(nodes):
-    """Take an average over all neighbor node features hu and use it to
-    overwrite the original node feature."""
-    accum = torch.mean(nodes.mailbox['m'], 1)
-    return {'h': accum}
-
-class NodeApplyModule(nn.Module):
-    """Update the node feature hv with ReLU(Whv+b)."""
-    def __init__(self, in_feats, out_feats, activation):
-        super(NodeApplyModule, self).__init__()
-        self.linear = nn.Linear(in_feats, out_feats)
-        self.activation = activation
-
-    def forward(self, node):
-        h = self.linear(node.data['h'])
-        h = self.activation(h)
-        return {'h' : h}
-
-class GCN(nn.Module):
-    def __init__(self, in_feats, out_feats, activation):
-        super(GCN, self).__init__()
-        self.apply_mod = NodeApplyModule(in_feats, out_feats, activation)
-
-    def forward(self, g, feature):
-        # Initialize the node features with h.
-        g.ndata['h'] = feature
-        g.update_all(msg, reduce)
-        g.apply_nodes(func=self.apply_mod)
-        return g.ndata.pop('h')
+    graphs = torch.FloatTensor(torch.cat(graphs))
+    labels = torch.LongTensor(torch.cat(labels).squeeze())
+    return graphs, labels
 
 #vae using gcn
 class VAE(nn.Module):
@@ -113,14 +81,14 @@ class VAE(nn.Module):
         super(VAE, self).__init__()
         
         # encoder
-        self.fc1 = GCN(g_dim, h_dim1, F.relu)
-        self.fc2 = GCN(h_dim1, h_dim2, F.relu)
-        self.fc31 = GCN(h_dim2, z_dim, F.linear) #mu
-        self.fc32 = GCN(h_dim2, z_dim, F.linear) #logvar
+        self.fc1 = GCNConv(g_dim, h_dim1, F.relu)
+        self.fc2 = GCNConv(h_dim1, h_dim2, F.relu)
+        self.fc31 = GCNConv(h_dim2, z_dim, F.linear)
+        self.fc32 = GCNConv(h_dim2, z_dim, F.linear)
         # decoder
-        self.fc4 = GCN(z_dim, h_dim2, F.relu)
-        self.fc5 = GCN(h_dim2, h_dim1, F.relu)
-        self.fc6 = GCN(h_dim1, g_dim, F.sigmoid)
+        self.fc4 = GCNConv(z_dim, h_dim2, F.relu)
+        self.fc5 = GCNConv(h_dim2, h_dim1, F.relu)
+        self.fc6 = GCNConv(h_dim1, g_dim, F.sigmoid)
         
     def encoder(self, g):
         h = self.fc1(g)
@@ -138,16 +106,11 @@ class VAE(nn.Module):
         return self.fc6(h)
     
     def forward(self, g):
-        h = g.in_degrees().view(-1, 1).float()
-        for conv in self.layers:
-            h = conv(g, h)
-        g.ndata['h'] = h
-        hg = dgl.mean_nodes(g, 'h')
-        mu, log_var = self.encoder(hg)
+        mu, log_var = self.encoder(g)
         z = self.sampling(mu, log_var)
         return self.decoder(z), mu, log_var
 
-model = VAE(g_dim=GDIM, h_dim1= HDIM1, h_dim2=HDIM2, z_dim=ZDIMS, n_classes=NSITES)
+model = kwargs[args.model](VAE(g_dim=GDIM, h_dim1= HDIM1, h_dim2=HDIM2, z_dim=ZDIMS, n_classes=NSITES))
 if CUDA:
     model.cuda()
 
@@ -160,14 +123,14 @@ def loss_function(recon_g, g, mu, log_var):
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 #load data
-train_dir = './data01/train/'
-test_dir = './data01/test/'
+train_dir = './data/train/'
+test_dir = './data/test/'
 
 trainset = CustomDataset(train_dir)
 testset = CustomDataset(test_dir)
 
-train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate, **kwargs)
-test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate, **kwargs)
+train_loader = DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate)#, **kwargs)
+test_loader = DataLoader(testset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate)#, **kwargs)
 
 #train and test
 def train(epoch):

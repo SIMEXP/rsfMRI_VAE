@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 @author: desiree lussier
+
+takes 3d nifti images in labeled folders 
 """
 
 import torch
@@ -22,11 +24,11 @@ BATCH_SIZE = 1
 LOG_INTERVAL = 10
 EPOCHS = 50
 ZDIMS = 50
-CLASSES = 20 
+CLASSES = 7 
 OPT_LEARN_RATE = 1e-4
 STEP_SIZE = 1 
 GAMMA = 0.9 
-HDIM=1024
+HDIM=576
 
 torch.manual_seed(SEED)
 if CUDA:
@@ -80,63 +82,67 @@ class UnFlatten(nn.Module):
         return input.view(input.size(0), size, 1, 1)
 
 class VAE(nn.Module):
-    def __init__(self, h_dim=HDIM, z_dim=ZDIMS, n_classes=CLASSES):
+    def __init__(self, image_channels=3, h_dim=HDIM, z_dim=ZDIMS, n_classes=CLASSES):
         super(VAE, self).__init__()
         
         print("VAE")
         #encoder cnn layers
         self.encoder = nn.Sequential(
-            nn.Conv3d(3, 16, kernel_size=3, stride=2), 
+            nn.Conv2d(image_channels, 16, kernel_size=1),# stride=(1, 1)), padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros')
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=4, stride=2, padding=0), #dilation=1, return_indices=False, ceil_mode=False),
-            nn.Conv3d(16, 32, kernel_size=3, stride=3),
+            nn.MaxPool2d(kernel_size=2),# stride=2, padding=0), #dilation=1, return_indices=False, ceil_mode=False),
+            nn.Conv2d(16, 32, kernel_size=2),# stride=3),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=4, stride=3, padding=0),
-            nn.Conv3d(32, 96, kernel_size=2, stride=3),
+            nn.MaxPool2d(kernel_size=2),# stride=3, padding=0),
+            nn.Conv2d(32, 96, kernel_size=2),# stride=3),
             nn.ReLU(),
-            nn.MaxPool3d(kernel_size=2, stride=2, padding=0),
+            nn.MaxPool2d(kernel_size=2),# stride=2, padding=0),
+            nn.Conv2d(96, 96, kernel_size=2),# stride=3),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),# stride=2, padding=0),
             Flatten()
         )
-        #nn.Conv3d(in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros')
-
-        self.fc1 = nn.Linear(h_dim, z_dim) #mu
+        
+        self.fc1 = nn.Linear(h_dim, z_dim) #mu     #RuntimeError: size mismatch, m1: [1 x 96], m2: [1024 x 50] 
         self.fc2 = nn.Linear(h_dim, z_dim) #logvar
-        self.fc3 = nn.Linear(z_dim, h_dim)
+        self.fc3 = nn.Linear(z_dim, h_dim)          
         
         #decoder cnn layers
         self.decoder = nn.Sequential(
             UnFlatten(),
-            nn.MaxUnpool3d(kernel_size=5, stride=2, padding=0),
-            nn.ConvTranspose3d(h_dim, 96, kernel_size=5, stride=2),
+            nn.MaxUnpool2d(kernel_size=5, stride=2, padding=0),
+            nn.ConvTranspose2d(h_dim, 96, kernel_size=5, stride=2),
             nn.ReLU(),
-            nn.MaxUnpool3d(kernel_size=5, stride=2, padding=0), 
-            nn.ConvTranspose3d(96, 32, kernel_size=5, stride=2),
+            nn.MaxUnpool2d(kernel_size=5, stride=2, padding=0), 
+            nn.ConvTranspose2d(96, 32, kernel_size=5, stride=2),
             nn.ReLU(),
-            nn.MaxUnpool3d(kernel_size=5, stride=2, padding=0),
-            nn.ConvTranspose3d(32, 16, kernel_size=5, stride=2),
+            nn.MaxUnpool2d(kernel_size=5, stride=2, padding=0),
+            nn.ConvTranspose2d(32, 16, kernel_size=5, stride=2),
             nn.ReLU(),
-            nn.ConvTranspose3d(16, 3, kernel_size=6, stride=2),
+            nn.ConvTranspose2d(16, image_channels, kernel_size=6, stride=2),
             nn.Sigmoid(),
         )
-
+      
     def reparameterize(self, mu, logvar):
         print("reparameterize") 
         std = logvar.mul(0.5).exp_()
         esp = torch.randn(*mu.size())
-        z = mu + std * esp
+        z = mu + std * esp         ####RuntimeError: expected backend CUDA and dtype Float but got backend CPU and dtype Float
         return z
 
     def bottleneck(self, h):
         print("bottleneck") 
         mu, logvar = self.fc1(h), self.fc2(h)
+        print("mu, logvar") 
         z = self.reparameterize(mu, logvar)
-        return z, mu, logvar
+        print("z") 
+        return z, mu, logvar 
     
     def encode(self, x):
         print("encode") 
         h = self.encoder(x)
         z, mu, logvar = self.bottleneck(h)
-        return z, mu, logvar
+        return z, mu, logvar 
 
     def decode(self, z):
         print("decode")
@@ -149,9 +155,7 @@ class VAE(nn.Module):
         z, mu, logvar = self.encode(x)
         z = self.decode(z)
         return z, mu, logvar
-        
-#image_channels = fixed_x.size(1) 
-
+   
 model = VAE()
 if CUDA:
     model.cuda()
@@ -179,7 +183,7 @@ test_loader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, 
 def train(epoch):
     model.train()
     train_loss = 0
-    for idx, (data, _) in enumerate(train_loader):
+    for idx, (data,_) in enumerate(train_loader):
         print("starting training")
         data = Variable(data)
         if CUDA:
@@ -203,7 +207,7 @@ def train(epoch):
 def test(epoch):
     model.eval()
     test_loss = 0
-    for i, (data, _) in enumerate(test_loader):
+    for i, (data,_) in enumerate(test_loader):
         if CUDA:
             data = data.cuda()
         data = Variable(data, requires_grad=False)

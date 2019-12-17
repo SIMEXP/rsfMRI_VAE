@@ -5,18 +5,19 @@
 
 takes 3d nifti images in labeled folders 
 """
-
-import torch
 import os
 import numpy as np
+import torch
 import torch.utils.data
-from glob import glob
-from nibabel import load as load_fmri
 from torch import nn, optim
+#workaroundfor RuntimeError: expected backend CUDA and dtype Float but got backend CPU and dtype Float
+torch.set_default_tensor_type(torch.cuda.FloatTensor)  
+from glob import glob
 from torch.autograd import Variable
 from torch.nn import functional as F
 from torchvision import transforms
 from torch.utils.data import DataLoader, Dataset
+from nibabel import load as load_fmri
 
 CUDA = True
 SEED = 1
@@ -103,9 +104,9 @@ class VAE(nn.Module):
             Flatten()
         )
         
-        self.fc1 = nn.Linear(h_dim, z_dim) #mu     #RuntimeError: size mismatch, m1: [1 x 96], m2: [1024 x 50] 
+        self.fc1 = nn.Linear(h_dim, z_dim) #mu
         self.fc2 = nn.Linear(h_dim, z_dim) #logvar
-        self.fc3 = nn.Linear(z_dim, h_dim)          
+        #self.fc3 = nn.Linear(z_dim, h_dim)          
         
         #decoder cnn layers
         self.decoder = nn.Sequential(
@@ -127,7 +128,7 @@ class VAE(nn.Module):
         print("reparameterize") 
         std = logvar.mul(0.5).exp_()
         esp = torch.randn(*mu.size())
-        z = mu + std * esp         ####RuntimeError: expected backend CUDA and dtype Float but got backend CPU and dtype Float
+        z = nn.Parameter(mu + std * esp)
         return z
 
     def bottleneck(self, h):
@@ -146,15 +147,15 @@ class VAE(nn.Module):
 
     def decode(self, z):
         print("decode")
-        z = self.fc3(z)
-        z = self.decoder(z)
+        #z = self.fc3(z) 
+        z = self.decoder(z) 
         return z
     
     def forward(self, x):
         print("forward")
         z, mu, logvar = self.encode(x)
         z = self.decode(z)
-        return z, mu, logvar
+        return z, mu, logvar  
    
 model = VAE()
 if CUDA:

@@ -3,12 +3,12 @@
 """
 @author: desiree lussier
 
-parameters and dataloader need editing to fit additional dimensions in data
 """
 
 import os
 import numpy as np
 import torch
+import torchmed
 import torch.utils.data
 from torch import nn, optim
 torch.set_default_tensor_type(torch.cuda.FloatTensor)  #comment out for cpu
@@ -19,23 +19,24 @@ from torchvision import transforms
 from torch.utils.data import DataLoader, Dataset
 from nibabel import load as load_fmri
 
-CUDA = True    #for cpu set to 'False'
-SEED = 1
-BATCH_SIZE = 1
+CUDA=True    #for cpu set to 'False'
+SEED=1
+BATCH_SIZE=1
 LOG_INTERVAL = 10
-EPOCHS = 5
-ZDIMS = 24
-CLASSES = 7 
-OPT_LEARN_RATE = 1e-4
-STEP_SIZE = 1 
-GAMMA = 0.9 
+EPOCHS=50
+ZDIMS=24
+CLASSES=17 
+OPT_LEARN_RATE=0.01
+STEP_SIZE=1 
+GAMMA=0.9 
 HDIM=576
+IMG=1       #set to 1 for grayscale and 3 for rgb
 
 torch.manual_seed(SEED)
 if CUDA:
     torch.cuda.manual_seed(SEED)
 
-# load tensors directly into GPU memory
+#load tensors directly into GPU memory
 kwargs = {'num_workers': 1, 'pin_memory': True} if CUDA else {}
 
 train_dir = "./train/"
@@ -59,19 +60,12 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx): 
         label,name=self.samples[idx]
-        print('label is %s' % label)
         print('name is %s' % name)
-        load = load_fmri(name).get_data()
-        npimg = np.array(load, dtype='int32')
-        npimg_fit=(npimg +1)*127.5
-        npimg_fit=npimg_fit.astype(np.uint8)
-        transform=transforms.Compose([
-                transforms.ToPILImage(),
-                transforms.ToTensor(),
-                ]) 
-        img=torch.tensor(transform(npimg_fit))
+        image = torchmed.readers.SitkReader(name)
+        npimage = image.to_numpy()
+        expanded = np.expand_dims(npimage, axis=0)
+        img = torch.from_numpy(expanded)
         nplabel=np.asarray(label, dtype='int32')
-        print('nplabel is %s' % nplabel)
         return img, nplabel 
 
 #define model
@@ -84,7 +78,7 @@ class UnFlatten(nn.Module):
         return input.view(input.size(0), size, 1, 1)
 
 class VAE(nn.Module):
-    def __init__(self, image_channels=3, h_dim=HDIM, z_dim=ZDIMS, n_classes=CLASSES):
+    def __init__(self, image_channels=IMG, h_dim=HDIM, z_dim=ZDIMS, n_classes=CLASSES):
         super(VAE, self).__init__()
         
         print("VAE")
@@ -158,7 +152,7 @@ if CUDA:
     model.cuda()
   
 #load previous state   
-#model.load_state_dict(torch.load('cnnvae.torch', map_location='cpu'))
+#model.load_state_dict(torch.load('c3dcnnvae.torch', map_location='cpu'))
 
 #loss function and optimizer
 def loss_function(recon_x, x, mu, logvar):
@@ -225,4 +219,4 @@ if __name__ == "__main__":
 #                       'results/sample_' + str(epoch) + '.png')
 
 #save model state
-torch.save(model.state_dict(), 'cnnvae.torch')
+torch.save(model.state_dict(), '3dcnnvae.torch')
